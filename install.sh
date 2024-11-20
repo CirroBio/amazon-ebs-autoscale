@@ -30,6 +30,7 @@
 
 set -e
 set -x
+export EBS_AUTOSCALE_CONFIG_FILE=/etc/ebs-autoscale.json
 
 USAGE=$(cat <<EOF
 Install Amazon EBS Autoscale
@@ -228,7 +229,7 @@ cat ${BASEDIR}/config/ebs-autoscale.json | \
   sed -e "s#%%MAXATTACHEDVOLUMES%%#${MAX_ATTACHED_VOLUMES}#" | \
   sed -e "s#%%INITIALUTILIZATIONTHRESHOLD%%#${INITIAL_UTILIZATION_THRESHOLD}#" | \
   sed -e "s#%%IMDSV2%%#${IMDSV2}#" \
-  > /etc/ebs-autoscale.json
+  > ${EBS_AUTOSCALE_CONFIG_FILE}
 
 ## Create filesystem
 if [ -e $MOUNTPOINT ] && ! [ -d $MOUNTPOINT ]; then
