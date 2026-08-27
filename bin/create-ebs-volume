@@ -341,9 +341,30 @@ function create_and_attach_volume() {
             --region $region \
             --volume-id $volume_id \
         > /dev/null
-        
+
         error "could not attach volume to instance"
     fi
+
+    # set volume delete on termination as soon as possible after attach to
+    # minimize the window during which a spot interruption/termination
+    # could leave the volume orphaned
+    local dot_status=1
+    for i in $(eval echo "{0..$max_attempts}") ; do
+        aws ec2 modify-instance-attribute \
+            --region $region \
+            --instance-id $instance_id \
+            --block-device-mappings "DeviceName=$device,Ebs={DeleteOnTermination=true,VolumeId=$volume_id}" \
+        > /dev/null
+        dot_status="$?"
+
+        if [ "$dot_status" -eq 0 ]; then
+            logthis "volume $volume_id DeleteOnTermination ENABLED"
+            break
+        elif [ $i -eq $max_attempts ]; then
+            logthis "Could not set DeleteOnTermination for volume $volume_id after $i attempts."
+        fi
+        sleep $(( 2 ** i + $RANDOM % 3))
+    done
     set -e
 
     logthis "waiting for volume $volume_id on filesystem"
@@ -354,14 +375,6 @@ function create_and_attach_volume() {
         fi
         sleep 1
     done
-
-    # set volume delete on termination
-    aws ec2 modify-instance-attribute \
-        --region $region \
-        --instance-id $instance_id \
-        --block-device-mappings "DeviceName=$device,Ebs={DeleteOnTermination=true,VolumeId=$volume_id}" \
-    > /dev/null
-    logthis "volume $volume_id DeleteOnTermination ENABLED"
 
     echo $device
 }
