@@ -1,0 +1,114 @@
+#!/bin/bash
+# Deletes EBS volumes created by amazon-ebs-autoscale that were orphaned when
+# their source instance terminated before DeleteOnTermination could be set on
+# them (e.g. a spot interruption between create-volume and attach).
+#
+# A volume is only deleted if ALL of the following are true:
+#   - it has the amazon-ebs-autoscale-creation-time tag
+#   - it is in the "available" state (not attached to anything)
+#   - it was created more than --min-age-minutes ago
+#
+# A volume being created by a live instance is only "available" for the few
+# seconds before it is attached, so anything unattached past the age
+# threshold has been abandoned.
+
+. /usr/local/amazon-ebs-autoscale/shared/utils.sh
+export EBS_AUTOSCALE_CONFIG_FILE=/etc/ebs-autoscale.json
+IMDSV2=$(get_config_value .imdsv2)
+initialize
+
+USAGE=$(cat <<USAGE_EOF
+Delete orphaned EBS volumes created by amazon-ebs-autoscale
+
+    $0 [options]
+
+Options
+
+    -a, --min-age-minutes N
+                        Only delete volumes created more than N minutes ago.
+                        (Default: 60)
+
+    -n, --dry-run       Log the volumes that would be deleted without deleting them.
+
+    -h, --help          Print help and exit.
+USAGE_EOF
+)
+
+MIN_AGE_MINUTES=60
+DRY_RUN=""
+while (( "$#" )); do
+    case "$1" in
+        -a|--min-age-minutes)
+            MIN_AGE_MINUTES=$2
+            shift 2
+            ;;
+        -n|--dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        -h|--help)
+            echo "$USAGE"
+            exit
+            ;;
+        *)
+            echo "unsupported argument $1" >&2
+            echo "$USAGE"
+            exit 1
+            ;;
+    esac
+done
+
+if ! [[ "$MIN_AGE_MINUTES" =~ ^[0-9]+$ ]]; then
+    echo "--min-age-minutes must be a whole number of minutes" >&2
+    exit 1
+fi
+
+set -o pipefail
+
+TAG=amazon-ebs-autoscale-creation-time
+
+function cleanup_orphaned_volumes() {
+    local region=$AWS_REGION
+
+    # "<volume-id> <create-time>" per line for every unattached autoscale
+    # volume in the region older than the threshold. CreateTime is UTC ISO 8601
+    # in every aws cli timestamp format, so comparing the first 19 characters
+    # (YYYY-MM-DDTHH:MM:SS) as strings orders them correctly
+    local candidates=""
+    candidates=$(
+        aws ec2 describe-volumes \
+            --region $region \
+            --filters "Name=tag-key,Values=$TAG" "Name=status,Values=available" \
+        | jq -r --argjson age "$MIN_AGE_MINUTES" '
+            (now - $age * 60 | strftime("%Y-%m-%dT%H:%M:%S")) as $cutoff
+            | .Volumes[]
+            | select(.CreateTime[0:19] < $cutoff)
+            | "\(.VolumeId) \(.CreateTime)"'
+    )
+    if [ $? -ne 0 ]; then
+        logthis "orphan cleanup: could not list volumes, skipping"
+        return 1
+    fi
+
+    if [ -z "$candidates" ]; then
+        logthis "orphan cleanup: no orphaned autoscale volumes older than $MIN_AGE_MINUTES minutes found"
+        return 0
+    fi
+
+    local volume_id=""
+    local create_time=""
+    while read -r volume_id create_time; do
+        if [ -n "$DRY_RUN" ]; then
+            logthis "orphan cleanup: [dry-run] would delete volume $volume_id (created $create_time)"
+            continue
+        fi
+
+        if aws ec2 delete-volume --region $region --volume-id $volume_id > /dev/null; then
+            logthis "orphan cleanup: deleted volume $volume_id (created $create_time)"
+        else
+            logthis "orphan cleanup: could not delete volume $volume_id"
+        fi
+    done <<< "$candidates"
+}
+
+cleanup_orphaned_volumes

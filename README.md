@@ -106,6 +106,11 @@ Options
 
     -i, --imdsv2        
                         Enable imdsv2 for instance metadata API requests.
+
+    --orphan-cleanup
+                        Delete orphaned volumes left behind by other
+                        terminated instances (e.g. after a spot interruption).
+                        Runs in the background. (Default: disabled)
 ```
 
 ## A note on the IAM Instance Profile
@@ -137,6 +142,20 @@ In the above, we assume that the `MyInstanceProfileWithProperPermissions` EC2 In
 
 Please note that if you enable EBS encryption and use a Customer Managed Key with AWS Key Management Service, then you should also ensure that you provide [appropriate IAM permissions](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSEncryption.html#ebs-encryption-permissions) to use that key.
 
+
+## A note on orphaned volumes
+
+Volumes are created and attached to a running instance in separate API calls, and `DeleteOnTermination` can only be set after the attachment. If the instance is terminated in between, for example by a spot interruption, the volume is left behind in the `available` state.
+
+The window is kept as short as possible, but it can't be removed entirely. Passing `--orphan-cleanup` to `install.sh` runs [`cleanup-orphaned-volumes`](bin/cleanup-orphaned-volumes) in the background on each new instance; it is disabled by default. Results are written to the ebs-autoscale log file. It deletes volumes in the region that:
+
+1. have the `amazon-ebs-autoscale-creation-time` tag,
+2. are in the `available` state, and
+3. were created more than 60 minutes ago (change with `--min-age-minutes`).
+
+A volume being created by a live instance is only `available` for the few seconds before it is attached, so anything still unattached past the threshold has been abandoned. `ec2:DeleteVolume` must be allowed on volumes created by other instances. Run `cleanup-orphaned-volumes --dry-run` to log what would be deleted without deleting anything.
+
+Note that this also deletes autoscale volumes that were deliberately detached and left `available` for more than the threshold, e.g. to inspect their data.
 
 ## A note on the Instance Storage
 
