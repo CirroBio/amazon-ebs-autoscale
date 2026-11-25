@@ -87,6 +87,11 @@ Options
 
     -i, --imdsv2        
                         Enable imdsv2 for instance metadata API requests.
+
+    --orphan-cleanup
+                        Delete orphaned volumes left behind by other
+                        terminated instances (e.g. after a spot interruption).
+                        Runs in the background. (Default: disabled)
     
 EOF
 )
@@ -103,6 +108,7 @@ MAX_LOGICAL_VOLUME_SIZE=8000
 MAX_ATTACHED_VOLUMES=16
 INITIAL_UTILIZATION_THRESHOLD=50
 IMDSV2=""
+ORPHAN_CLEANUP=""
 
 DEVICE=""
 FILE_SYSTEM=btrfs
@@ -167,6 +173,10 @@ while (( "$#" )); do
             IMDSV2="true"
             shift 1
             ;;
+        --orphan-cleanup)
+            ORPHAN_CLEANUP=1
+            shift 1
+            ;;
         -h|--help)
             echo "$USAGE"
             exit
@@ -202,7 +212,7 @@ fi
 # Install executables
 # make executables available on standard PATH
 mkdir -p /usr/local/amazon-ebs-autoscale/{bin,shared}
-cp ${BASEDIR}/bin/{create-ebs-volume,ebs-autoscale} /usr/local/amazon-ebs-autoscale/bin
+cp ${BASEDIR}/bin/{create-ebs-volume,ebs-autoscale,cleanup-orphaned-volumes} /usr/local/amazon-ebs-autoscale/bin
 chmod +x /usr/local/amazon-ebs-autoscale/bin/*
 ln -sf /usr/local/amazon-ebs-autoscale/bin/* /usr/local/bin/
 ln -sf /usr/local/amazon-ebs-autoscale/bin/* /usr/bin/
@@ -280,3 +290,12 @@ case $INIT_SYSTEM in
     exit 1
 esac
 cd ${BASEDIR}
+
+## Clean up volumes orphaned by other terminated instances (e.g. a spot
+## interruption between volume creation and setting DeleteOnTermination).
+## Runs detached in the background so it never delays or fails the install;
+## results are written to the ebs-autoscale log file.
+if [ -n "${ORPHAN_CLEANUP}" ]; then
+  nohup /usr/local/amazon-ebs-autoscale/bin/cleanup-orphaned-volumes > /dev/null 2>&1 &
+  echo "orphaned volume cleanup started in background, see $(get_config_value .logging.log_file)"
+fi

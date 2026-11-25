@@ -313,12 +313,29 @@ function create_and_attach_volume() {
 
     logthis "created volume: $volume_id [ $volume_opts ]"
 
-    # In theory this shouldn't need to loop as aws ec2 wait will retry but I have seen it exceed request limits
-    for i in {1..3} ; do
-       if aws ec2 wait volume-available --region $region --volume-ids $volume_id; then
-         logthis "volume $volume_id available"
-         break
-       fi
+    # poll for the volume to become available every second rather than using
+    # `aws ec2 wait volume-available`, which polls every 15s. every second
+    # between create and DeleteOnTermination is a window in which a spot
+    # termination leaves the volume orphaned
+    local volume_state=""
+    for i in {1..120} ; do
+        volume_state=$(
+            aws ec2 describe-volumes \
+                --region $region \
+                --volume-ids $volume_id \
+                --query 'Volumes[0].State' \
+                --output text \
+            2> /dev/null
+        ) || true
+
+        if [ "$volume_state" == "available" ]; then
+            logthis "volume $volume_id available"
+            break
+        elif [ $i -eq 120 ]; then
+            logthis "volume $volume_id not available after $i seconds (last state: ${volume_state:-unknown}), attempting to attach anyway"
+            break
+        fi
+        sleep 1
     done
 
     # Need to assure that the created volume is successfully attached to be
@@ -326,7 +343,6 @@ function create_and_attach_volume() {
     set +e
     logthis "attaching volume $volume_id"
 
-    sleep 1
     aws ec2 attach-volume \
         --region $region \
         --device $device \
@@ -347,9 +363,11 @@ function create_and_attach_volume() {
 
     # set volume delete on termination as soon as possible after attach to
     # minimize the window during which a spot interruption/termination
-    # could leave the volume orphaned
+    # could leave the volume orphaned. this fails until the device shows up in
+    # the instance's block device mapping, so retry on a short fixed interval
+    local dot_max_attempts=60
     local dot_status=1
-    for i in $(eval echo "{0..$max_attempts}") ; do
+    for i in $(eval echo "{0..$dot_max_attempts}") ; do
         aws ec2 modify-instance-attribute \
             --region $region \
             --instance-id $instance_id \
@@ -360,10 +378,11 @@ function create_and_attach_volume() {
         if [ "$dot_status" -eq 0 ]; then
             logthis "volume $volume_id DeleteOnTermination ENABLED"
             break
-        elif [ $i -eq $max_attempts ]; then
+        elif [ $i -eq $dot_max_attempts ]; then
             logthis "Could not set DeleteOnTermination for volume $volume_id after $i attempts."
+            break
         fi
-        sleep $(( 2 ** i + $RANDOM % 3))
+        sleep 1
     done
     set -e
 
